@@ -11,20 +11,29 @@ A command-line tool for record linkage and deduplication of person records using
 - **Output Formats**: Support for CSV and Parquet output formats.
 - **Scalable**: Built on PySpark for handling large datasets.
 
+## Requirements
+
+- Python 3.10+
+- Java 11+ (required by PySpark)
+- PySpark 3.3+
+- See `requirements.txt` for the full dependency list.
+
+> **Windows note:** If a system `SPARK_HOME` environment variable points to an older Spark installation, the CLI will automatically clear it at startup to avoid JVM classpath conflicts.
+
 ## Installation
 
-1. Ensure you have Python 3.8+ installed.
-2. Install the required dependencies:
-
-   ```
-   pip install -r requirements.txt
-   ```
-
-3. (Optional) Set up a virtual environment:
+1. Ensure you have Python 3.10+ and Java 11+ installed.
+2. Create and activate a virtual environment:
 
    ```
    python -m venv .venv
-   .venv\Scripts\activate  # On Windows
+   .venv\Scripts\activate  # Windows
+   source .venv/bin/activate  # macOS/Linux
+   ```
+
+3. Install the required dependencies:
+
+   ```
    pip install -r requirements.txt
    ```
 
@@ -40,7 +49,7 @@ The tool provides two main commands: `dedup` for deduplication and `link` for li
 - `--blocking-key`: Column to use for blocking (e.g., surname).
 - `--threshold`: Similarity threshold for matching (default varies).
 - `--output-format`: Output format (csv or parquet, default: csv).
-- `--id-col`: Column name for record IDs (default: id).
+- `--id-col`: Column name for record IDs (default: `rec_id`).
 - `--output-col`: Column name for cluster/match IDs (default: cluster_id).
 - `--blocking-prefix`: Length of blocking key prefix (default: 1).
 - `--num-partitions`: Number of Spark partitions (default: 10).
@@ -61,19 +70,22 @@ Link records between two datasets:
 python cli.py link --input-a persons_a.csv --input-b persons_b.csv --output results/linked/ --blocking-key given_name --threshold 2.0 --output-format parquet
 ```
 
-## Requirements
+## Tests
 
-- Python 3.8+
-- PySpark
-- recordlinkage
-- pandas
-- See `requirements.txt` for full list.
+Run the test suite with:
+
+```
+pip install pytest
+pytest tests/
+```
 
 ## How It Works
 
 The tool uses the `recordlinkage` library to compute similarity scores between records based on string comparisons (e.g., Jaro-Winkler distance for names) and exact matches for fields like date of birth or gender. It employs a blocking strategy to reduce computational complexity by grouping records with similar blocking keys before comparison.
 
 Matches are resolved into clusters using a Union-Find algorithm, assigning cluster IDs to grouped records.
+
+To avoid spawning Python worker subprocesses (which is unreliable on some platforms), all pairwise comparison is performed locally in the driver process using pandas, and data is transferred to and from Spark exclusively through temporary CSV files read by the JVM.
 
 ## Contributing
 

@@ -28,7 +28,17 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
+import os
 from typing import Optional
+
+# Must be set before PySpark initialises the JVM so worker subprocesses
+# use the same interpreter as the driver instead of the bare 'python' stub.
+os.environ.setdefault("PYSPARK_PYTHON", sys.executable)
+os.environ.setdefault("PYSPARK_DRIVER_PYTHON", sys.executable)
+
+# Remove any system-level SPARK_HOME that points to a different Spark
+# installation; PySpark should use its own bundled JARs instead.
+os.environ.pop("SPARK_HOME", None)
 
 from pyspark.sql import SparkSession
 
@@ -52,19 +62,23 @@ def _build_spark(app_name: str) -> SparkSession:
     return (
         SparkSession.builder
         .appName(app_name)
-        .config("spark.sql.execution.arrow.pyspark.enabled", "true")
+        .config("spark.sql.execution.arrow.pyspark.enabled", "false")
         .config("spark.sql.execution.arrow.pyspark.fallback.enabled", "true")
         .getOrCreate()
     )
 
 
 def _write(df, path: str, fmt: str) -> None:
-    writer = df.coalesce(1).write.mode("overwrite")
+    os.makedirs(path, exist_ok=True)
+    # Use pandas for output to avoid Hadoop native-IO issues on Windows
+    # (Spark's CSV/Parquet committer requires hadoop.dll which may not be present).
+    pdf = df.toPandas()
+    out_file = os.path.join(path, f"part-00000.{fmt}")
     if fmt == "parquet":
-        writer.parquet(path)
+        pdf.to_parquet(out_file, index=False)
     else:
-        writer.option("header", "true").csv(path)
-    logging.getLogger(__name__).info("Wrote %s output to: %s", fmt.upper(), path)
+        pdf.to_csv(out_file, index=False)
+    logging.getLogger(__name__).info("Wrote %s output to: %s", fmt.upper(), out_file)
 
 
 def cmd_dedup(args: argparse.Namespace) -> None:

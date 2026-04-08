@@ -28,8 +28,11 @@ is joined back to the original Spark DataFrames.
 
 from __future__ import annotations
 
+import csv as _csv_mod
 import logging
-from typing import Dict, Iterator, List, Optional, Tuple
+import os
+import tempfile
+from typing import Callable, Dict, Iterator, List, Optional, Tuple
 
 import pandas as pd
 from pyspark.sql import DataFrame, SparkSession
@@ -347,15 +350,78 @@ class RecordLinker:
     # Internal – deduplication
     # ------------------------------------------------------------------
 
+    def _dict_to_sdf(self, d: Dict[str, str], key_col: str, val_col: str) -> DataFrame:
+        """
+        Persist *d* as a temp CSV and return a cached Spark DataFrame.
+
+        ``createDataFrame(python_data)`` is avoided because PySpark 4.x spawns a
+        Python worker subprocess even for small lists, which crashes on Windows
+        with Python 3.13.  Reading from a local CSV file is handled entirely by
+        the JVM and is safe on all platforms.
+        """
+        tmp = tempfile.NamedTemporaryFile(
+            mode="w", suffix=".csv", delete=False, newline="", encoding="utf-8"
+        )
+        tmp_path = tmp.name
+        try:
+            writer = _csv_mod.writer(tmp)
+            writer.writerow([key_col, val_col])
+            writer.writerows(d.items())
+            tmp.close()
+            sdf = self.spark.read.option("header", "true").csv(
+                tmp_path.replace("\\", "/")
+            )
+            sdf = sdf.cache()
+            sdf.count()  # materialise so we can safely delete the temp file
+        finally:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+        return sdf
+
+    def _pairs_to_sdf(self, pairs_pdf: pd.DataFrame) -> DataFrame:
+        """Write (id_a, id_b, score) pandas DataFrame to temp CSV and return a cached Spark DataFrame."""
+        tmp = tempfile.NamedTemporaryFile(
+            mode="w", suffix=".csv", delete=False, newline="", encoding="utf-8"
+        )
+        tmp_path = tmp.name
+        try:
+            pairs_pdf[["id_a", "id_b", "score"]].to_csv(tmp, index=False)
+            tmp.close()
+            sdf = self.spark.read.option("header", "true").csv(tmp_path.replace("\\", "/"))
+            sdf = sdf.withColumn("score", F.col("score").cast(DoubleType())).cache()
+            sdf.count()
+        finally:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+        return sdf
+
     def _generate_dedup_pairs(self, df: DataFrame, id_col: str = "rec_id") -> DataFrame:
         block_expr = blocking_key_expr(self.blocking_key, self.blocking_prefix_len)
-        blocked = df.withColumn("_block", block_expr).repartition(self.num_partitions, "_block")
+        blocked_pdf = df.withColumn("_block", block_expr).toPandas()
         comparator = _dedup_fn(self.match_threshold, id_col)
-        return blocked.mapInPandas(comparator, schema=_PAIRS_SCHEMA)
+        results: List[pd.DataFrame] = []
+        for _, group in blocked_pdf.groupby("_block"):
+            for chunk in comparator(iter([group])):
+                if not chunk.empty:
+                    results.append(chunk)
+        pairs_pdf = pd.concat(results, ignore_index=True) if results else \
+            pd.DataFrame({"id_a": pd.Series(dtype=str), "id_b": pd.Series(dtype=str), "score": pd.Series(dtype=float)})
+        return self._pairs_to_sdf(pairs_pdf)
 
     def _run_deduplication(self, df: DataFrame, id_col: str, output_col: str) -> DataFrame:
-        pairs_df = self._generate_dedup_pairs(df, id_col=id_col)
-        pair_rows: List[Tuple[str, str]] = [(r["id_a"], r["id_b"]) for r in pairs_df.collect()]
+        # Collect to pandas and compare locally – avoids mapInPandas Python workers
+        block_expr = blocking_key_expr(self.blocking_key, self.blocking_prefix_len)
+        blocked_pdf = df.withColumn("_block", block_expr).toPandas()
+        comparator = _dedup_fn(self.match_threshold, id_col)
+        pair_rows: List[Tuple[str, str]] = []
+        for _, group in blocked_pdf.groupby("_block"):
+            for chunk in comparator(iter([group])):
+                if not chunk.empty:
+                    pair_rows.extend(zip(chunk["id_a"].tolist(), chunk["id_b"].tolist()))
         logger.info("Dedup: %d candidate pairs above threshold", len(pair_rows))
 
         uf = UnionFind()
@@ -364,14 +430,9 @@ class RecordLinker:
             uf.find(rid)
         cluster_map: Dict[str, str] = uf.assign_cluster_ids(pair_rows)
 
-        cluster_sdf = self.spark.createDataFrame(
-            list(cluster_map.items()),
-            schema=StructType([
-                StructField(id_col, StringType(), nullable=False),
-                StructField(output_col, StringType(), nullable=False),
-            ]),
-        )
-        result = df.join(cluster_sdf, on=id_col, how="left")
+        cluster_sdf = self._dict_to_sdf(cluster_map, id_col, output_col)
+        result = df.join(cluster_sdf, on=id_col, how="left").cache()
+        result.count()  # materialise before cluster_sdf temp file is gone
         logger.info("Dedup complete. Distinct clusters: %d", result.select(output_col).distinct().count())
         return result
 
@@ -409,15 +470,52 @@ class RecordLinker:
         tagged_a = tagged_a.select(all_cols)
         tagged_b = tagged_b.select(all_cols)
 
-        combined = tagged_a.union(tagged_b).repartition(self.num_partitions, "_block")
+        combined_pdf = tagged_a.union(tagged_b).toPandas()
         comparator = _link_fn(self.match_threshold, id_col_a, id_col_b_internal)
-        return combined.mapInPandas(comparator, schema=_PAIRS_SCHEMA)
+        results: List[pd.DataFrame] = []
+        for _, group in combined_pdf.groupby("_block"):
+            for chunk in comparator(iter([group])):
+                if not chunk.empty:
+                    results.append(chunk)
+        pairs_pdf = pd.concat(results, ignore_index=True) if results else \
+            pd.DataFrame({"id_a": pd.Series(dtype=str), "id_b": pd.Series(dtype=str), "score": pd.Series(dtype=float)})
+        return self._pairs_to_sdf(pairs_pdf)
 
     def _run_linking(
         self, df_a: DataFrame, df_b: DataFrame, id_col: str, output_col: str
     ) -> Tuple[DataFrame, DataFrame]:
-        pairs_df = self._generate_link_pairs(df_a, df_b, id_col_a=id_col, id_col_b=id_col)
-        pair_rows: List[Tuple[str, str]] = [(r["id_a"], r["id_b"]) for r in pairs_df.collect()]
+        # Collect to pandas and compare locally – avoids mapInPandas Python workers
+        block_expr = blocking_key_expr(self.blocking_key, self.blocking_prefix_len)
+        tagged_a = df_a.withColumn("_source", F.lit("a")).withColumn("_block", block_expr)
+        tagged_b = df_b.withColumn("_source", F.lit("b")).withColumn("_block", block_expr)
+
+        cols_a = set(tagged_a.columns)
+        cols_b = set(tagged_b.columns)
+        for c in cols_b - cols_a:
+            tagged_a = tagged_a.withColumn(c, F.lit(None).cast(StringType()))
+        for c in cols_a - cols_b:
+            tagged_b = tagged_b.withColumn(c, F.lit(None).cast(StringType()))
+
+        if id_col == id_col:  # id_col_a == id_col_b in this call path
+            tagged_b = tagged_b.withColumnRenamed(id_col, f"{id_col}_b")
+            id_col_b_internal = f"{id_col}_b"
+        else:
+            id_col_b_internal = id_col
+
+        all_cols = sorted(set(tagged_a.columns) | set(tagged_b.columns))
+        for c in all_cols:
+            if c not in tagged_a.columns:
+                tagged_a = tagged_a.withColumn(c, F.lit(None).cast(StringType()))
+            if c not in tagged_b.columns:
+                tagged_b = tagged_b.withColumn(c, F.lit(None).cast(StringType()))
+        combined_pdf = tagged_a.select(all_cols).union(tagged_b.select(all_cols)).toPandas()
+
+        comparator = _link_fn(self.match_threshold, id_col, id_col_b_internal)
+        pair_rows: List[Tuple[str, str]] = []
+        for _, group in combined_pdf.groupby("_block"):
+            for chunk in comparator(iter([group])):
+                if not chunk.empty:
+                    pair_rows.extend(zip(chunk["id_a"].tolist(), chunk["id_b"].tolist()))
         logger.info("Link: %d candidate pairs above threshold", len(pair_rows))
 
         uf = UnionFind()
@@ -432,17 +530,11 @@ class RecordLinker:
             match_map_a[a_id] = root
             match_map_b[b_id] = root
 
-        def _to_sdf(mapping: Dict[str, str], key_col: str) -> DataFrame:
-            rows = list(mapping.items())
-            schema = StructType([
-                StructField(key_col, StringType(), nullable=False),
-                StructField(output_col, StringType(), nullable=False),
-            ])
-            if not rows:
-                return self.spark.createDataFrame([], schema=schema)
-            return self.spark.createDataFrame(rows, schema=schema)
-
-        result_a = df_a.join(_to_sdf(match_map_a, id_col), on=id_col, how="left")
-        result_b = df_b.join(_to_sdf(match_map_b, id_col), on=id_col, how="left")
+        sdf_a = self._dict_to_sdf(match_map_a, id_col, output_col)
+        sdf_b = self._dict_to_sdf(match_map_b, id_col, output_col)
+        result_a = df_a.join(sdf_a, on=id_col, how="left").cache()
+        result_b = df_b.join(sdf_b, on=id_col, how="left").cache()
+        result_a.count()
+        result_b.count()
         logger.info("Linking complete. %d match groups found.", len(set(match_map_a.values())))
         return result_a, result_b

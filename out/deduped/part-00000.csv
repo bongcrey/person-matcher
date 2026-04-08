@@ -1,0 +1,11 @@
+rec_id,given_name,surname,date_of_birth,gender,cluster_id
+d001,john,smith,1985-03-12,m,d001
+d002,jon,smyth,1985-03-12,m,d002
+d003,mary,jones,1990-07-24,f,d003
+d004,marie,jones,1990-07-24,f,d004
+d005,robert,brown,1978-11-05,m,d005
+d006,patricia,white,1995-01-30,f,d006
+d007,james,wilson,1982-06-18,m,d007
+d008,james,wilsn,1982-06-18,m,d008
+d009,linda,taylor,1988-09-03,f,d009
+d010,michael,anderson,1975-04-22,m,d010

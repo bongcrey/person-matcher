@@ -1,0 +1,11 @@
+rec_id,given_name,surname,date_of_birth,gender,cluster_id
+b001,jon,smyth,1985-03-12,m,a001
+b002,marie,jones,1990-07-24,f,a002
+b003,rob,brown,1978-11-05,m,a003
+b004,patricia,white,1995-01-30,f,a004
+b005,james,wilsn,1982-06-18,m,a005
+b006,linda,taylor,1988-09-03,f,a006
+b007,mike,anderson,1975-04-22,m,a007
+b008,barbara,thomas,1993-12-11,f,a008
+b009,will,jackson,1969-08-07,m,a009
+b010,liz,harris,1991-02-16,f,

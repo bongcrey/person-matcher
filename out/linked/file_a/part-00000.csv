@@ -1,0 +1,11 @@
+rec_id,given_name,surname,date_of_birth,gender,cluster_id
+a001,john,smith,1985-03-12,m,a001
+a002,mary,jones,1990-07-24,f,a002
+a003,robert,brown,1978-11-05,m,a003
+a004,patricia,white,1995-01-30,f,a004
+a005,james,wilson,1982-06-18,m,a005
+a006,linda,taylor,1988-09-03,f,a006
+a007,michael,anderson,1975-04-22,m,a007
+a008,barbara,thomas,1993-12-11,f,a008
+a009,william,jackson,1969-08-07,m,a009
+a010,elizabeth,harris,1991-02-16,f,

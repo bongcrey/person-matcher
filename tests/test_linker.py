@@ -9,6 +9,8 @@ import unittest
 
 import pytest
 from pyspark.sql import SparkSession
+from pyspark.sql import functions as F
+from pyspark.sql.types import StringType
 
 from person_matcher import RecordLinker
 from person_matcher.utils import UnionFind, blocking_key_expr, load_file
@@ -23,9 +25,9 @@ PERSONS_DUPES = os.path.join(DATA_DIR, "persons_dupes.csv")
 def spark():
     session = (
         SparkSession.builder
-        .master("local[2]")
+        .master("local[1]")
         .appName("PersonMatcherTests")
-        .config("spark.sql.execution.arrow.pyspark.enabled", "true")
+        .config("spark.sql.execution.arrow.pyspark.enabled", "false")
         .config("spark.sql.execution.arrow.pyspark.fallback.enabled", "true")
         .config("spark.ui.enabled", "false")
         .config("spark.sql.shuffle.partitions", "4")
@@ -72,12 +74,12 @@ class TestUnionFind(unittest.TestCase):
 
 class TestBlockingKey:
     def test_prefix_length(self, spark):
-        df = spark.createDataFrame([("  Alice  ",)], ["given_name"])
+        df = spark.range(1).withColumn("given_name", F.lit("  Alice  "))
         df = df.withColumn("_block", blocking_key_expr("given_name", prefix_len=2))
         assert df.collect()[0]["_block"] == "al"
 
     def test_handles_null(self, spark):
-        df = spark.createDataFrame([(None,)], ["given_name"])
+        df = spark.range(1).withColumn("given_name", F.lit(None).cast(StringType()))
         df = df.withColumn("_block", blocking_key_expr("given_name", prefix_len=2))
         assert df.collect()[0]["_block"] is None
 
@@ -95,8 +97,13 @@ class TestLoadFile:
 
 class TestPreprocess:
     def test_lowercase_trim(self, spark):
-        rows = [("  JOHN  ", "  SMITH  ", "1985-03-12", "M")]
-        df = spark.createDataFrame(rows, ["given_name", "surname", "date_of_birth", "gender"])
+        df = (
+            spark.range(1)
+            .withColumn("given_name", F.lit("  JOHN  "))
+            .withColumn("surname", F.lit("  SMITH  "))
+            .withColumn("date_of_birth", F.lit("1985-03-12"))
+            .withColumn("gender", F.lit("M"))
+        )
         result = RecordLinker(spark).preprocess(df)
         row = result.collect()[0]
         assert row["given_name"] == "john"
