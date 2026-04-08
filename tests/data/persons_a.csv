@@ -1,0 +1,11 @@
+rec_id,given_name,surname,date_of_birth,gender
+a001,john,smith,1985-03-12,m
+a002,mary,jones,1990-07-24,f
+a003,robert,brown,1978-11-05,m
+a004,patricia,white,1995-01-30,f
+a005,james,wilson,1982-06-18,m
+a006,linda,taylor,1988-09-03,f
+a007,michael,anderson,1975-04-22,m
+a008,barbara,thomas,1993-12-11,f
+a009,william,jackson,1969-08-07,m
+a010,elizabeth,harris,1991-02-16,f
